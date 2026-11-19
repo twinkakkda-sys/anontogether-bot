@@ -107,6 +107,7 @@ def link_url(token):
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
+    print("START HANDLER RECEIVED:", message.from_user.id, repr(message.text))
     await save_user(message.from_user)
 
     args = message.text.split(maxsplit=1)
@@ -409,6 +410,11 @@ async def webhook(request: Request):
         context={"bot": bot}
     )
 
-    await dp.feed_update(bot, update)
+    print("WEBHOOK UPDATE:", update.update_id, "message:", bool(update.message), "callback:", bool(update.callback_query))
+    try:
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        print("WEBHOOK HANDLER ERROR:", repr(e))
+        raise
 
     return JSONResponse({"ok": True})
