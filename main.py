@@ -1,3 +1,4 @@
+
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -86,7 +87,6 @@ async def setup_database():
             );
         """)
 
-        # Удаляем старое поле с ID отправителя, если оно осталось
         await conn.execute(
             "ALTER TABLE messages DROP COLUMN IF EXISTS sender_id"
         )
@@ -107,22 +107,7 @@ def link_url(token):
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    print("1. START RECEIVED")
-
-    try:
-        await message.answer(
-            "🔥 Бот отвечает! Telegram работает."
-        )
-        print("2. MESSAGE SENT")
-    except Exception as e:
-        print("SEND ERROR:", repr(e))
-        return
-
-    try:
-        await save_user(message.from_user)
-        print("3. USER SAVED")
-    except Exception as e:
-        print("DATABASE ERROR:", repr(e))
+    await save_user(message.from_user)
 
     args = message.text.split(maxsplit=1)
 
@@ -139,7 +124,9 @@ async def start(message: types.Message):
             )
 
             if not link:
-                await message.answer("Эта общая ссылка больше не существует.")
+                await message.answer(
+                    "Эта общая ссылка больше не существует."
+                )
                 return
 
             await db.execute("""
@@ -162,7 +149,10 @@ async def start(message: types.Message):
         )
 
         if link:
-            if link["kind"] == "personal" and link["owner_id"] == message.from_user.id:
+            if (
+                link["kind"] == "personal"
+                and link["owner_id"] == message.from_user.id
+            ):
                 await message.answer(
                     "Это твоя собственная ссылка. Отправь её друзьям!"
                 )
@@ -200,6 +190,8 @@ async def start(message: types.Message):
 
 @dp.callback_query(F.data == "personal")
 async def personal(callback: types.CallbackQuery):
+    await callback.answer()
+
     user_id = callback.from_user.id
 
     token = await db.fetchval("""
@@ -227,11 +219,12 @@ async def personal(callback: types.CallbackQuery):
         f"{link_url(token)}\n\n"
         "Размести её в соцсетях и получай анонимные сообщения."
     )
-    await callback.answer()
 
 
 @dp.callback_query(F.data == "create_group")
 async def create_group(callback: types.CallbackQuery):
+    await callback.answer()
+
     user_id = callback.from_user.id
     token = make_token()
 
@@ -258,11 +251,12 @@ async def create_group(callback: types.CallbackQuery):
         f"{invite_link}\n\n"
         "Каждое сообщение по общей ссылке получат все участники."
     )
-    await callback.answer()
 
 
 @dp.callback_query(F.data == "inbox")
 async def inbox(callback: types.CallbackQuery):
+    await callback.answer()
+
     rows = await db.fetch("""
         SELECT body, created_at FROM messages m
         WHERE EXISTS (
@@ -277,12 +271,11 @@ async def inbox(callback: types.CallbackQuery):
         await callback.message.answer("📭 Пока сообщений нет.")
     else:
         text = "📨 Последние сообщения:\n\n"
+
         for row in rows:
             text += f"• {row['body']}\n\n"
 
         await callback.message.answer(text)
-
-    await callback.answer()
 
 
 @dp.message(F.text)
