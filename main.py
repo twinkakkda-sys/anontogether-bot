@@ -122,7 +122,14 @@ BOT_USERNAME = None
 @dp.message(CommandStart())
 async def start(message: types.Message):
     print("START COMMAND RECEIVED:", message.text)
+    print("1. START HANDLER")
+try:
     await save_user(message.from_user)
+    print("2. USER SAVED")
+except Exception as e:
+    print("SAVE USER ERROR:", repr(e))
+    await message.answer("Ошибка сохранения пользователя")
+    return
 
     args = message.text.split(maxsplit=1)
     if len(args) > 1:
