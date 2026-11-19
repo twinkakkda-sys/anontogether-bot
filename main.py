@@ -381,7 +381,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await bot.delete_webhook()
+    # Do not delete the webhook on shutdown.
+    # During Render deployments an old instance may stop after the new one
+    # starts; deleting here would remove the new instance's webhook.
     await bot.session.close()
     await db.close()
 
