@@ -194,13 +194,48 @@ def result_text(s):
       "<i>Развлекательная мистическая интерпретация, не научный прогноз.</i>")
 async def start_polling():
     global bot
-    bot=Bot(TOKEN)
-    try:
-        await bot.delete_webhook(drop_pending_updates=False)
-        await dp.start_polling(bot,allowed_updates=dp.resolve_used_update_types())
-    except asyncio.CancelledError: raise
-    except Exception: log.exception("Polling stopped")
-    finally: await bot.session.close()
+
+    retry_delay = 5
+
+    while True:
+        current_bot = Bot(TOKEN)
+        bot = current_bot
+
+        try:
+            await current_bot.delete_webhook(drop_pending_updates=False)
+            log.info("🔮 Звёздная Призма подключается к Telegram...")
+
+            await dp.start_polling(
+                current_bot,
+                allowed_updates=dp.resolve_used_update_types(),
+                handle_signals=False,
+                close_bot_session=False,
+            )
+
+            log.warning("⚠️ Polling завершился без ошибки. Повторный запуск через %s секунд.", retry_delay)
+            retry_delay = 5
+
+        except asyncio.CancelledError:
+            log.info("Остановка polling по команде сервера")
+            raise
+
+        except TelegramConflictError:
+            log.exception("⚠️ TelegramConflictError: возможно, запущен второй экземпляр бота. Повтор через 15 секунд.")
+            retry_delay = 15
+
+        except Exception:
+            log.exception("❌ Ошибка polling. Повторное подключение через %s секунд.", retry_delay)
+
+        finally:
+            try:
+                await current_bot.session.close()
+            except Exception:
+                log.exception("Ошибка при закрытии Telegram-сессии")
+
+            if bot is current_bot:
+                bot = None
+
+        await asyncio.sleep(retry_delay)
 bot=None
 @dp.message(CommandStart())
 async def start(m: types.Message):
@@ -254,13 +289,24 @@ async def other(m: types.Message):
     else: await m.answer("Выбери действие в меню ниже, и Призма откроет новое послание.",reply_markup=menu())
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not TOKEN: raise RuntimeError("Не задан BOT_TOKEN в переменных окружения")
+    if not TOKEN:
+        raise RuntimeError("Не задан BOT_TOKEN в переменных окружения")
+
     db()
-    task=asyncio.create_task(start_polling())
-    yield
-    task.cancel()
-    try: await task
-    except asyncio.CancelledError: pass
+    log.info("🌌 Звёздная Призма запускается")
+
+    task = asyncio.create_task(start_polling(), name="telegram-polling")
+
+    try:
+        yield
+    finally:
+        log.info("Останавливаем Звёздную Призму...")
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 app=FastAPI(lifespan=lifespan)
 @app.get("/")
 async def root(): return {"status":"Zvezdnaya Prizma is running","bot":"@ZvezdnyaPrizmaBot"}
