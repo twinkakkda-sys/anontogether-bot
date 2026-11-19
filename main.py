@@ -121,6 +121,7 @@ BOT_USERNAME = None
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
+    print("START COMMAND RECEIVED:", message.text)
     await save_user(message.from_user)
 
     args = message.text.split(maxsplit=1)
