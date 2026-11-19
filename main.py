@@ -108,15 +108,22 @@ def link_url(token):
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    print("START COMMAND RECEIVED:", message.text)
+    print("1. START RECEIVED")
+
+    try:
+        await message.answer(
+            "🔥 Бот отвечает! Telegram работает."
+        )
+        print("2. MESSAGE SENT")
+    except Exception as e:
+        print("SEND ERROR:", repr(e))
+        return
 
     try:
         await save_user(message.from_user)
-        print("USER SAVED")
+        print("3. USER SAVED")
     except Exception as e:
-        print("SAVE USER ERROR:", repr(e))
-        await message.answer("Ошибка сохранения пользователя.")
-        return
+        print("DATABASE ERROR:", repr(e))
 
     args = message.text.split(maxsplit=1)
 
