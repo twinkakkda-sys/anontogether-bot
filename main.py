@@ -1,5 +1,5 @@
+
 import os
-import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit, unquote
@@ -22,6 +22,7 @@ if not all([BOT_TOKEN, WEBHOOK_SECRET, RENDER_HOST, DATABASE_URL]):
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = None
+BOT_USERNAME = None
 
 
 def make_token():
@@ -30,24 +31,9 @@ def make_token():
 
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="👤 Моя ссылка",
-                callback_data="personal"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="👥 Создать общую ссылку",
-                callback_data="create_group"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="📨 Мои сообщения",
-                callback_data="inbox"
-            )
-        ]
+        [InlineKeyboardButton(text="👤 Моя ссылка", callback_data="personal")],
+        [InlineKeyboardButton(text="👥 Создать общую ссылку", callback_data="create_group")],
+        [InlineKeyboardButton(text="📨 Мои сообщения", callback_data="inbox")]
     ])
 
 
@@ -96,11 +82,15 @@ async def setup_database():
             CREATE TABLE IF NOT EXISTS messages (
                 id BIGSERIAL PRIMARY KEY,
                 token TEXT NOT NULL,
-                sender_id BIGINT,
                 body TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+
+        # Удаляем старое поле с ID отправителя, если оно осталось
+        await conn.execute(
+            "ALTER TABLE messages DROP COLUMN IF EXISTS sender_id"
+        )
 
 
 async def save_user(user):
@@ -116,9 +106,6 @@ def link_url(token):
     return f"https://t.me/{BOT_USERNAME}?start={token}"
 
 
-BOT_USERNAME = None
-
-
 @dp.message(CommandStart())
 async def start(message: types.Message):
     print("START COMMAND RECEIVED:", message.text)
@@ -128,13 +115,18 @@ async def start(message: types.Message):
         print("USER SAVED")
     except Exception as e:
         print("SAVE USER ERROR:", repr(e))
-        await message.answer("Ошибка сохранения пользователя")
+        await message.answer("Ошибка сохранения пользователя.")
         return
 
     args = message.text.split(maxsplit=1)
-        # Ссылка для приглашения в команду
+
+    if len(args) > 1:
+        token = args[1].strip()
+
+        # Приглашение в общую ссылку
         if token.startswith("join_"):
             group_token = token[5:]
+
             link = await db.fetchrow(
                 "SELECT * FROM links WHERE token=$1 AND kind='group'",
                 group_token
@@ -146,7 +138,8 @@ async def start(message: types.Message):
 
             await db.execute("""
                 INSERT INTO members(token, user_id)
-                VALUES($1, $2) ON CONFLICT DO NOTHING
+                VALUES($1, $2)
+                ON CONFLICT DO NOTHING
             """, group_token, message.from_user.id)
 
             await message.answer(
@@ -156,26 +149,23 @@ async def start(message: types.Message):
             )
             return
 
+        # Обычная личная или общая ссылка
         link = await db.fetchrow(
-            "SELECT * FROM links WHERE token=$1", token
+            "SELECT * FROM links WHERE token=$1",
+            token
         )
 
         if link:
-            if link["kind"] == "personal":
-                recipients = await db.fetchval(
-                    "SELECT COUNT(*) FROM members WHERE token=$1",
-                    token
+            if link["kind"] == "personal" and link["owner_id"] == message.from_user.id:
+                await message.answer(
+                    "Это твоя собственная ссылка. Отправь её друзьям!"
                 )
-                if link["owner_id"] == message.from_user.id:
-                    await message.answer(
-                        "Это твоя собственная ссылка. Отправь её друзьям!"
-                    )
-                    return
-            else:
-                recipients = await db.fetchval(
-                    "SELECT COUNT(*) FROM members WHERE token=$1",
-                    token
-                )
+                return
+
+            recipients = await db.fetchval(
+                "SELECT COUNT(*) FROM members WHERE token=$1",
+                token
+            )
 
             if recipients == 0:
                 await message.answer("Получателей пока нет.")
@@ -213,12 +203,14 @@ async def personal(callback: types.CallbackQuery):
 
     if not token:
         token = make_token()
+
         async with db.acquire() as conn:
             async with conn.transaction():
                 await conn.execute("""
                     INSERT INTO links(token, owner_id, kind)
                     VALUES($1, $2, 'personal')
                 """, token, user_id)
+
                 await conn.execute("""
                     INSERT INTO members(token, user_id)
                     VALUES($1, $2)
@@ -250,9 +242,7 @@ async def create_group(callback: types.CallbackQuery):
             """, token, user_id)
 
     public_link = link_url(token)
-    invite_link = (
-        f"https://t.me/{BOT_USERNAME}?start=join_{token}"
-    )
+    invite_link = f"https://t.me/{BOT_USERNAME}?start=join_{token}"
 
     await callback.message.answer(
         "👥 Общая ссылка создана!\n\n"
@@ -273,7 +263,8 @@ async def inbox(callback: types.CallbackQuery):
             SELECT 1 FROM members mb
             WHERE mb.token=m.token AND mb.user_id=$1
         )
-        ORDER BY id DESC LIMIT 10
+        ORDER BY id DESC
+        LIMIT 10
     """, callback.from_user.id)
 
     if not rows:
@@ -282,6 +273,7 @@ async def inbox(callback: types.CallbackQuery):
         text = "📨 Последние сообщения:\n\n"
         for row in rows:
             text += f"• {row['body']}\n\n"
+
         await callback.message.answer(text)
 
     await callback.answer()
@@ -308,15 +300,21 @@ async def receive_message(message: types.Message):
     body = message.text.strip()
 
     if not body or len(body) > 3000:
-        await message.answer("Сообщение должно быть от 1 до 3000 символов.")
+        await message.answer(
+            "Сообщение должно быть от 1 до 3000 символов."
+        )
         return
 
     link = await db.fetchrow(
-        "SELECT * FROM links WHERE token=$1", token
+        "SELECT * FROM links WHERE token=$1",
+        token
     )
 
     if not link:
-        await db.execute("DELETE FROM pending WHERE user_id=$1", user_id)
+        await db.execute(
+            "DELETE FROM pending WHERE user_id=$1",
+            user_id
+        )
         await message.answer("Ссылка больше не существует.")
         return
 
@@ -331,14 +329,16 @@ async def receive_message(message: types.Message):
     ]
 
     if not recipient_ids:
-        await message.answer("Пока нет других участников, которым можно отправить сообщение.")
+        await message.answer(
+            "Пока нет других участников, которым можно отправить сообщение."
+        )
         return
 
-    # Сохраняем анонимное сообщение без раскрытия отправителя
+    # Сохраняем текст без Telegram ID отправителя
     await db.execute("""
-        INSERT INTO messages(token, sender_id, body)
-        VALUES($1, $2, $3)
-    """, token, user_id, body)
+        INSERT INTO messages(token, body)
+        VALUES($1, $2)
+    """, token, body)
 
     await db.execute(
         "DELETE FROM pending WHERE user_id=$1",
@@ -346,6 +346,7 @@ async def receive_message(message: types.Message):
     )
 
     delivered = 0
+
     for recipient_id in recipient_ids:
         try:
             await bot.send_message(
@@ -354,8 +355,8 @@ async def receive_message(message: types.Message):
                 f"{body}"
             )
             delivered += 1
-        except Exception:
-            pass
+        except Exception as e:
+            print("MESSAGE DELIVERY ERROR:", repr(e))
 
     await message.answer(
         f"✅ Сообщение отправлено! Получателей: {delivered}."
@@ -365,6 +366,7 @@ async def receive_message(message: types.Message):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global BOT_USERNAME
+
     await setup_database()
 
     me = await bot.get_me()
@@ -374,6 +376,8 @@ async def lifespan(app: FastAPI):
         url=f"https://{RENDER_HOST}/webhook",
         secret_token=WEBHOOK_SECRET
     )
+
+    print("BOT STARTED:", BOT_USERNAME)
 
     yield
 
@@ -400,9 +404,12 @@ async def webhook(request: Request):
         raise HTTPException(status_code=403)
 
     data = await request.json()
+
     update = types.Update.model_validate(
-        data, context={"bot": bot}
+        data,
+        context={"bot": bot}
     )
+
     await dp.feed_update(bot, update)
 
     return JSONResponse({"ok": True})
