@@ -352,7 +352,9 @@ async def receive_message(message: types.Message):
             await bot.send_message(
                 recipient_id,
                 "📩 Новое анонимное сообщение!\n\n"
-                f"{body}"
+                f"{body}\n\n"
+                "🤖 Отправлено через AnonTogether\n"
+                f"👉 https://t.me/{BOT_USERNAME}"
             )
             delivered += 1
         except Exception as e:
