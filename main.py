@@ -418,3 +418,17 @@ async def webhook(request: Request):
         raise
 
     return JSONResponse({"ok": True})
+
+
+@app.get("/webhook-status")
+async def webhook_status():
+    info = await bot.get_webhook_info()
+    return {
+        "url": info.url,
+        "has_custom_certificate": info.has_custom_certificate,
+        "pending_update_count": info.pending_update_count,
+        "last_error_date": info.last_error_date.isoformat() if info.last_error_date else None,
+        "last_error_message": info.last_error_message,
+        "max_connections": info.max_connections,
+        "allowed_updates": info.allowed_updates,
+    }
