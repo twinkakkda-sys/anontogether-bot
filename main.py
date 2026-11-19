@@ -122,19 +122,16 @@ BOT_USERNAME = None
 @dp.message(CommandStart())
 async def start(message: types.Message):
     print("START COMMAND RECEIVED:", message.text)
-    print("1. START HANDLER")
-try:
-    await save_user(message.from_user)
-    print("2. USER SAVED")
-except Exception as e:
-    print("SAVE USER ERROR:", repr(e))
-    await message.answer("Ошибка сохранения пользователя")
-    return
+
+    try:
+        await save_user(message.from_user)
+        print("USER SAVED")
+    except Exception as e:
+        print("SAVE USER ERROR:", repr(e))
+        await message.answer("Ошибка сохранения пользователя")
+        return
 
     args = message.text.split(maxsplit=1)
-    if len(args) > 1:
-        token = args[1].strip()
-
         # Ссылка для приглашения в команду
         if token.startswith("join_"):
             group_token = token[5:]
