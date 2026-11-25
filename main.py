@@ -1,4 +1,3 @@
-
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -6,7 +5,7 @@ from urllib.parse import urlsplit, unquote
 
 import asyncpg
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -15,6 +14,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_ID = os.getenv("ADMIN_ID")
 
 if not all([BOT_TOKEN, WEBHOOK_SECRET, RENDER_HOST, DATABASE_URL]):
     raise RuntimeError("Не заданы переменные окружения")
@@ -87,9 +87,13 @@ async def setup_database():
             );
         """)
 
-        await conn.execute(
-            "ALTER TABLE messages DROP COLUMN IF EXISTS sender_id"
-        )
+        # Сохраняем автора только у новых сообщений. Старые записи останутся анонимными.
+        await conn.execute("""
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS sender_id BIGINT;
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS sender_username TEXT;
+        """)
 
 
 async def save_user(user):
@@ -103,6 +107,41 @@ async def save_user(user):
 
 def link_url(token):
     return f"https://t.me/{BOT_USERNAME}?start={token}"
+
+
+@dp.message(Command("admin"))
+async def admin_messages(message: types.Message):
+    if not ADMIN_ID or str(message.from_user.id) != ADMIN_ID:
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    rows = await db.fetch("""
+        SELECT id, sender_id, sender_username, body, created_at
+        FROM messages
+        ORDER BY id DESC
+        LIMIT 10
+    """)
+
+    if not rows:
+        await message.answer("Пока сообщений нет.")
+        return
+
+    parts = ["🔐 Последние 10 анонимных сообщений (только для владельца):"]
+    for row in rows:
+        username = f"@{row['sender_username']}" if row["sender_username"] else "нет username"
+        sender_id = str(row["sender_id"]) if row["sender_id"] else "не сохранён (старое сообщение)"
+        created = row["created_at"].strftime("%d.%m.%Y %H:%M UTC")
+        body = row["body"][:700]
+        parts.append(
+            f"\n#{row['id']} | {created}\n"
+            f"Автор: {username} | ID: {sender_id}\n"
+            f"Текст: {body}"
+        )
+
+    output = "\n".join(parts)
+    # Telegram ограничивает длину сообщения; отправляем блоками.
+    for start in range(0, len(output), 3900):
+        await message.answer(output[start:start + 3900])
 
 
 @dp.message(CommandStart())
@@ -334,11 +373,11 @@ async def receive_message(message: types.Message):
         )
         return
 
-    # Сохраняем текст без Telegram ID отправителя
+    # Автор сохраняется в базе и доступен только владельцу через /admin.
     await db.execute("""
-        INSERT INTO messages(token, body)
-        VALUES($1, $2)
-    """, token, body)
+        INSERT INTO messages(token, body, sender_id, sender_username)
+        VALUES($1, $2, $3, $4)
+    """, token, body, user_id, message.from_user.username)
 
     await db.execute(
         "DELETE FROM pending WHERE user_id=$1",
