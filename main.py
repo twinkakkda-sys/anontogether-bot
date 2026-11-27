@@ -85,6 +85,11 @@ async def setup_database():
                 body TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
+
+            CREATE TABLE IF NOT EXISTS reply_pending (
+                user_id BIGINT PRIMARY KEY,
+                message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE
+            );
         """)
 
         # Сохраняем автора только у новых сообщений. Старые записи останутся анонимными.
@@ -93,6 +98,8 @@ async def setup_database():
             ADD COLUMN IF NOT EXISTS sender_id BIGINT;
             ALTER TABLE messages
             ADD COLUMN IF NOT EXISTS sender_username TEXT;
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS recipient_id BIGINT;
         """)
 
 
@@ -293,6 +300,40 @@ async def create_group(callback: types.CallbackQuery):
     )
 
 
+@dp.callback_query(F.data.startswith("reply:"))
+async def start_reply(callback: types.CallbackQuery):
+    await callback.answer()
+    try:
+        message_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.message.answer("Не удалось открыть ответ.")
+        return
+
+    original = await db.fetchrow(
+        "SELECT id, sender_id, recipient_id FROM messages WHERE id=$1",
+        message_id
+    )
+    if (
+        not original
+        or original["recipient_id"] != callback.from_user.id
+        or not original["sender_id"]
+        or original["sender_id"] == callback.from_user.id
+    ):
+        await callback.message.answer("На это сообщение уже нельзя ответить.")
+        return
+
+    await db.execute("""
+        INSERT INTO reply_pending(user_id, message_id)
+        VALUES($1, $2)
+        ON CONFLICT(user_id)
+        DO UPDATE SET message_id=EXCLUDED.message_id
+    """, callback.from_user.id, message_id)
+
+    await callback.message.answer(
+        "💬 Напиши ответ одним сообщением. Его получит автор анонимно."
+    )
+
+
 @dp.callback_query(F.data == "inbox")
 async def inbox(callback: types.CallbackQuery):
     await callback.answer()
@@ -322,6 +363,59 @@ async def inbox(callback: types.CallbackQuery):
 async def receive_message(message: types.Message):
     user_id = message.from_user.id
     await save_user(message.from_user)
+
+    reply = await db.fetchrow(
+        "SELECT message_id FROM reply_pending WHERE user_id=$1",
+        user_id
+    )
+
+    if reply:
+        body = message.text.strip()
+        if not body or len(body) > 3000:
+            await message.answer("Ответ должен быть от 1 до 3000 символов.")
+            return
+
+        original = await db.fetchrow("""
+            SELECT id, token, sender_id
+            FROM messages
+            WHERE id=$1 AND recipient_id=$2
+        """, reply["message_id"], user_id)
+
+        await db.execute(
+            "DELETE FROM reply_pending WHERE user_id=$1",
+            user_id
+        )
+
+        if not original or not original["sender_id"]:
+            await message.answer("Автор исходного сообщения недоступен.")
+            return
+
+        recipient_id = original["sender_id"]
+        sent_row = await db.fetchrow("""
+            INSERT INTO messages(token, body, sender_id, sender_username, recipient_id)
+            VALUES($1, $2, $3, $4, $5)
+            RETURNING id
+        """, original["token"], body, user_id, message.from_user.username, recipient_id)
+
+        try:
+            await bot.send_message(
+                recipient_id,
+                "💬 Тебе ответили анонимно!\n\n"
+                f"{body}\n\n"
+                "🤖 Отправлено через AnonTogether\n"
+                f"👉 https://t.me/{BOT_USERNAME}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="💬 Ответить",
+                        callback_data=f"reply:{sent_row['id']}"
+                    )]
+                ])
+            )
+            await message.answer("✅ Ответ отправлен! Можешь продолжить переписку.")
+        except Exception as e:
+            print("REPLY DELIVERY ERROR:", repr(e))
+            await message.answer("Не удалось доставить ответ. Возможно, собеседник заблокировал бота.")
+        return
 
     pending = await db.fetchrow(
         "SELECT token FROM pending WHERE user_id=$1",
@@ -373,12 +467,6 @@ async def receive_message(message: types.Message):
         )
         return
 
-    # Автор сохраняется в базе и доступен только владельцу через /admin.
-    await db.execute("""
-        INSERT INTO messages(token, body, sender_id, sender_username)
-        VALUES($1, $2, $3, $4)
-    """, token, body, user_id, message.from_user.username)
-
     await db.execute(
         "DELETE FROM pending WHERE user_id=$1",
         user_id
@@ -388,12 +476,24 @@ async def receive_message(message: types.Message):
 
     for recipient_id in recipient_ids:
         try:
+            saved = await db.fetchrow("""
+                INSERT INTO messages(token, body, sender_id, sender_username, recipient_id)
+                VALUES($1, $2, $3, $4, $5)
+                RETURNING id
+            """, token, body, user_id, message.from_user.username, recipient_id)
+
             await bot.send_message(
                 recipient_id,
                 "📩 Новое анонимное сообщение!\n\n"
                 f"{body}\n\n"
                 "🤖 Отправлено через AnonTogether\n"
-                f"👉 https://t.me/{BOT_USERNAME}"
+                f"👉 https://t.me/{BOT_USERNAME}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="💬 Ответить",
+                        callback_data=f"reply:{saved['id']}"
+                    )]
+                ])
             )
             delivered += 1
         except Exception as e:
