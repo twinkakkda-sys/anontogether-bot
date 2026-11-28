@@ -122,12 +122,19 @@ async def admin_messages(message: types.Message):
         await message.answer("⛔ Нет доступа.")
         return
 
+    admin_id = int(ADMIN_ID)
+
+    # Only messages delivered to the admin through links owned by the admin.
     rows = await db.fetch("""
-        SELECT id, sender_id, sender_username, body, created_at
-        FROM messages
-        ORDER BY id DESC
+        SELECT m.id, m.sender_id, m.sender_username, m.body, m.created_at
+        FROM messages m
+        JOIN links l ON l.token = m.token
+        WHERE l.owner_id = $1
+          AND m.recipient_id = $1
+          AND m.sender_id IS DISTINCT FROM $1
+        ORDER BY m.id DESC
         LIMIT 10
-    """)
+    """, admin_id)
 
     if not rows:
         await message.answer("Пока сообщений нет.")
